@@ -3,6 +3,25 @@
 #include <argos3/core/simulator/simulator.h>
 #include <argos3/plugins/robots/foot-bot/simulator/footbot_entity.h>
 
+static const size_t MIN_PHEROMONE_DENSITY = 2; 
+static const size_t MAX_LOCAL_PHEROMONES = 10;
+static const size_t MAX_SHARED_PHEROMONES = 3;
+
+static const argos::Real PHEROMONE_FOLLOW_PROBABILITY = 0.25;
+
+static const argos::Real COMMUNICATION_RADIUS = 2.0;
+static const argos::Real DUPLICATE_PHEROMONE_RADIUS = 0.5;
+static const argos::Real DUPLICATE_PHEROMONE_RADIUS_SQ = DUPLICATE_PHEROMONE_RADIUS * DUPLICATE_PHEROMONE_RADIUS;
+
+static size_t DebugCreatedPheromones = 0;
+static size_t DebugSharedPheromones = 0;
+static size_t DebugSelectedPheromones = 0;
+static size_t DebugPheromoneSearchFailures = 0;
+
+static size_t DebugRandomSearchSelections = 0;
+static size_t DebugPheromoneSearchSelections = 0;
+static size_t DebugSiteFidelitySelections = 0;
+
 CPFA_controller::CPFA_controller() :
 	RNG(argos::CRandom::CreateRNG("argos")),
 	isInformed(false),
@@ -109,8 +128,29 @@ void CPFA_controller::ControlStep() {
 	//UpdateTargetRayList();
 	CPFA();
 	UpdateLocalPheromoneList();
+
+	// if(LocalPheromoneList.size() > 0) {
+	// 	m_pcLEDs->SetAllColors(CColor::BLUE);   // Has pheromone information
+	// }
+	// else {
+	// 	m_pcLEDs->SetAllColors(CColor::BLACK);  // No pheromone information
+	// }
+
 	SharePheromonesLocally();
-	Move();	
+
+	if(GetId() == "F00" && SimulationTick() % 5000 == 0) {
+		std::cout << "[DEBUG SUMMARY] "
+				  << "created=" << DebugCreatedPheromones
+				  << " shared=" << DebugSharedPheromones
+				  << " selected=" << DebugSelectedPheromones
+				  << " failed_searches=" << DebugPheromoneSearchFailures
+				  << " random=" << DebugRandomSearchSelections
+				  << " pheromone=" << DebugPheromoneSearchSelections
+				  << " fidelity=" << DebugSiteFidelitySelections
+				  << std::endl;
+	}
+	
+	Move();
 }
 
 void CPFA_controller::Reset() {
@@ -134,11 +174,15 @@ void CPFA_controller::Reset() {
 
 	myTrail.clear();
 	LocalPheromoneList.clear();
+	BadPheromoneLocations.clear();
 
 	isInformed = false;
 	isHoldingFood = false;
 	isUsingSiteFidelity = false;
 	isGivingUpSearch = false;
+	isUsingPheromone = false;
+	reachedPheromoneTarget = false;
+	CurrentPheromoneTarget.Set(0.0, 0.0);
 }
 
 bool CPFA_controller::IsHoldingFood() {
@@ -299,25 +343,22 @@ void CPFA_controller::Departing()
      }
 	
      /* Are we informed? I.E. using site fidelity or pheromones. */	
-     if(isInformed && distanceToTarget < TargetDistanceTolerance) {
-          //ofstream log_output_stream;
-          //log_output_stream.open("cpfa_log.txt", ios::app);
-          //log_output_stream << "Reached waypoint: " << SiteFidelityPosition << endl;
-        
-          SearchTime = 0;
-          CPFA_state = SEARCHING;
-          travelingTime+=SimulationTick()-startTime;//qilu 10/22
-          startTime = SimulationTick();//qilu 10/22
+	if(isInformed && distanceToTarget < TargetDistanceTolerance) {
+		SearchTime = 0;
 
-          if(isUsingSiteFidelity) {
-               isUsingSiteFidelity = false;
-               SetFidelityList();
-               //log_output_stream << "After SetFidelityList: " << SiteFidelityPosition << endl;
-               //log_output_stream.close();
-          }
-     }
+		if(isUsingPheromone) {
+			reachedPheromoneTarget = true;
+		}
 
+		CPFA_state = SEARCHING;
+		travelingTime+=SimulationTick()-startTime;
+		startTime = SimulationTick();
 
+		if(isUsingSiteFidelity) {
+			isUsingSiteFidelity = false;
+			SetFidelityList();
+		}
+	}
 }
 
 void CPFA_controller::Searching() {
@@ -338,6 +379,14 @@ void CPFA_controller::Searching() {
          // randomly give up searching
          if(SimulationTick()% (5*SimulationTicksPerSecond())==0 && random < LoopFunctions->ProbabilityOfReturningToNest) {
              
+			if(isUsingPheromone && reachedPheromoneTarget && !isHoldingFood) {
+				DebugPheromoneSearchFailures++;
+				AddBadPheromoneLocation(CurrentPheromoneTarget);
+				RemoveLocalPheromoneNear(CurrentPheromoneTarget);
+				isUsingPheromone = false;
+				reachedPheromoneTarget = false;
+			}
+
              SetFidelityList();
 	      TrailToShare.clear();
              SetIsHeadingToNest(true);
@@ -525,6 +574,9 @@ void CPFA_controller::Returning() {
 		    //log_output_stream << "Using site fidelity" << endl;
 		        SetIsHeadingToNest(false);
 		        SetTarget(SiteFidelityPosition);
+
+				DebugSiteFidelitySelections++;
+
 		        isInformed = true;
 	    }
       // use pheromone waypoints
@@ -574,6 +626,8 @@ void CPFA_controller::Returning() {
 }
 
 void CPFA_controller::SetRandomSearchLocation() {
+	DebugRandomSearchSelections++;
+
 	argos::Real random_wall = RNG->Uniform(argos::CRange<argos::Real>(0.0, 1.0));
 	argos::Real x = 0.0, y = 0.0;
 
@@ -626,16 +680,18 @@ void CPFA_controller::SetHoldingFood() {
                                      searchingTime+=SimulationTick()-startTime;
                                      startTime = SimulationTick();
 				   //distribute a new food 
-			         argos::CVector2 placementPosition;
-			         placementPosition.Set(RNG->Uniform(ForageRangeX), RNG->Uniform(ForageRangeY));
+			        //  argos::CVector2 placementPosition;
+			        //  placementPosition.Set(RNG->Uniform(ForageRangeX), RNG->Uniform(ForageRangeY));
 			          
-			         while(LoopFunctions->IsOutOfBounds(placementPosition, 1, 1)){
-			             placementPosition.Set(RNG->Uniform(ForageRangeX), RNG->Uniform(ForageRangeY));
-			         }
-			         newFoodList.push_back(placementPosition);
-					 newFoodColoringList.push_back(LoopFunctions->FoodColoringList[i]);
-                    LoopFunctions->increaseNumDistributedFoodByOne(); //the total number of cubes in the arena should be updated. qilu 11/15/2018
+			        //  while(LoopFunctions->IsOutOfBounds(placementPosition, 1, 1)){
+			        //      placementPosition.Set(RNG->Uniform(ForageRangeX), RNG->Uniform(ForageRangeY));
+			        //  }
+			        //  newFoodList.push_back(placementPosition);
+					//  newFoodColoringList.push_back(LoopFunctions->FoodColoringList[i]);
+                    // LoopFunctions->increaseNumDistributedFoodByOne(); //the total number of cubes in the arena should be updated. qilu 11/15/2018
 					 //end
+					 // Food respawn disabled for assignment experiments.
+					// The collected food item is removed from FoodList and not replaced.
                                      break;
 			             } else {
                       //Return this unfound-food position to the list
@@ -675,27 +731,63 @@ void CPFA_controller::SetHoldingFood() {
 }
 
 void CPFA_controller::CreateLocalPheromone() {
-	argos::Real poissonCDF_pLayRate =
-		GetPoissonCDF(ResourceDensity, LoopFunctions->RateOfLayingPheromone);
+	/*
+    std::cout << "[CREATE ENTER] "
+              << GetId()
+              << " entered CreateLocalPheromone()"
+              << " | ResourceDensity=" << ResourceDensity
+              << " | updateFidelity=" << updateFidelity
+              << std::endl;
+	*/ 
 
-	argos::Real r1 = RNG->Uniform(argos::CRange<argos::Real>(0.0, 1.0));
+    if(!updateFidelity) {
+		/*
+        std::cout << "[CREATE BLOCKED] "
+                  << GetId()
+                  << " did not create pheromone because updateFidelity=false"
+                  << std::endl;
+		*/ 
+        return;
+    }
 
-	if(poissonCDF_pLayRate <= r1 || !updateFidelity) return;
-
-	argos::Real timeInSeconds =
-		(argos::Real)SimulationTick() / (argos::Real)SimulationTicksPerSecond();
-
-	Pheromone sharedPheromone(
-		SiteFidelityPosition,
-		TrailToShare,
-		timeInSeconds,
-		LoopFunctions->RateOfPheromoneDecay,
-		ResourceDensity
-	);
-
-	if(!HasPheromone(sharedPheromone)) {
-		LocalPheromoneList.push_back(sharedPheromone);
+	if(ResourceDensity < MIN_PHEROMONE_DENSITY) {
+		return;
 	}
+
+    argos::Real timeInSeconds =
+        (argos::Real)SimulationTick() / (argos::Real)SimulationTicksPerSecond();
+
+    Pheromone sharedPheromone(
+        SiteFidelityPosition,
+        TrailToShare,
+        timeInSeconds,
+        LoopFunctions->RateOfPheromoneDecay,
+        ResourceDensity
+    );
+
+    if(!HasPheromone(sharedPheromone)) {
+        if(LocalPheromoneList.size() < MAX_LOCAL_PHEROMONES) {
+    		LocalPheromoneList.push_back(sharedPheromone);
+			DebugCreatedPheromones++;
+		} 
+
+		/*
+        std::cout << "[CREATE SUCCESS] "
+                  << GetId()
+                  << " stored local pheromone"
+                  << " | ResourceDensity=" << ResourceDensity
+                  << " | LocalPheromoneList size=" << LocalPheromoneList.size()
+                  << std::endl;
+		*/ 
+    }
+    else {
+		/*
+        std::cout << "[CREATE DUPLICATE] "
+                  << GetId()
+                  << " skipped pheromone because duplicate was detected"
+                  << std::endl;
+		*/
+    }
 }
 
 void CPFA_controller::UpdateLocalPheromoneList() {
@@ -719,7 +811,7 @@ void CPFA_controller::UpdateLocalPheromoneList() {
 
 bool CPFA_controller::HasPheromone(Pheromone& pheromone) {
 	for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
-		if((LocalPheromoneList[i].GetLocation() - pheromone.GetLocation()).SquareLength() < 0.0025) {
+		if((LocalPheromoneList[i].GetLocation() - pheromone.GetLocation()).SquareLength() < DUPLICATE_PHEROMONE_RADIUS_SQ) {
 			return true;
 		}
 	}
@@ -727,8 +819,67 @@ bool CPFA_controller::HasPheromone(Pheromone& pheromone) {
 	return false;
 }
 
+void CPFA_controller::RemoveLocalPheromoneNear(argos::CVector2 location) {
+    std::vector<Pheromone> kept;
+
+    for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
+        if((LocalPheromoneList[i].GetLocation() - location).SquareLength()
+           >= DUPLICATE_PHEROMONE_RADIUS_SQ) {
+            kept.push_back(LocalPheromoneList[i]);
+        }
+    }
+
+    LocalPheromoneList = kept;
+}
+
+bool CPFA_controller::IsBadPheromoneLocation(argos::CVector2 location) {
+    for(size_t i = 0; i < BadPheromoneLocations.size(); i++) {
+        if((BadPheromoneLocations[i] - location).SquareLength()
+           < DUPLICATE_PHEROMONE_RADIUS_SQ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void CPFA_controller::AddBadPheromoneLocation(argos::CVector2 location) {
+    if(!IsBadPheromoneLocation(location)) {
+        BadPheromoneLocations.push_back(location);
+    }
+}
+
+argos::Real CPFA_controller::GetPheromoneScore(Pheromone& pheromone) {
+    argos::Real distance =
+        (pheromone.GetLocation() - GetPosition()).Length();
+
+    return (pheromone.GetWeight() *
+            (argos::Real)pheromone.GetResourceDensity()) /
+           (1.0 + distance);
+}
+
 void CPFA_controller::SharePheromonesLocally() {
-	if(LocalPheromoneList.size() == 0) return;
+	// if(SimulationTick() % 1000 == 0) {
+    // std::cout << "[SHARE ENTER] "
+    //           << GetId()
+    //           << " entered SharePheromonesLocally()"
+    //           << " | local pheromones=" << LocalPheromoneList.size()
+    //           << std::endl;
+	// }
+
+	if(LocalPheromoneList.size() == 0) {
+		// if(SimulationTick() % 1000 == 0) {
+		// 	std::cout << "[SHARE EMPTY] "
+		// 			  << GetId()
+		// 			  << " has no pheromones to share"
+		// 			  << std::endl;
+		// }
+		return;
+	}
+
+	size_t sharedCount = 0;
+	size_t duplicateCount = 0;
+	size_t inactiveCount = 0;
 
 	argos::CSpace::TMapPerType& footbots =
 		argos::CSimulator::GetInstance().GetSpace().GetEntitiesByType("foot-bot");
@@ -747,15 +898,97 @@ void CPFA_controller::SharePheromonesLocally() {
 
 		if(other.GetId() == GetId()) continue;
 
-		if((other.GetPosition() - GetPosition()).Length() <= 2.0) {
-			for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
-				if(LocalPheromoneList[i].IsActive() &&
-				   !other.HasPheromone(LocalPheromoneList[i])) {
-					other.LocalPheromoneList.push_back(LocalPheromoneList[i]);
+		argos::Real distance =
+			(other.GetPosition() - GetPosition()).Length();
+
+		if(SimulationTick() % 1000 == 0 && LocalPheromoneList.size() > 0) {
+			// std::cout << "[NEIGHBOR CHECK] "
+			// 		<< GetId()
+			// 		<< " to " << other.GetId()
+			// 		<< " | distance=" << distance
+			// 		<< std::endl;
+		}
+
+		if(distance <= COMMUNICATION_RADIUS) {
+			std::vector<size_t> sharedIndices;
+
+			for(size_t pick = 0; pick < MAX_SHARED_PHEROMONES; pick++) {
+				argos::Real bestScore = -1.0;
+				size_t bestIndex = LocalPheromoneList.size();
+
+				for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
+					if(!LocalPheromoneList[i].IsActive()) {
+						inactiveCount++;
+						continue;
+					}
+
+					if(LocalPheromoneList[i].GetResourceDensity() < MIN_PHEROMONE_DENSITY) {
+						continue;
+					}
+
+					bool alreadyPicked = false;
+					for(size_t j = 0; j < sharedIndices.size(); j++) {
+						if(sharedIndices[j] == i) {
+							alreadyPicked = true;
+							break;
+						}
+					}
+
+					if(alreadyPicked) continue;
+
+					argos::Real score = GetPheromoneScore(LocalPheromoneList[i]);
+
+					if(score > bestScore) {
+						bestScore = score;
+						bestIndex = i;
+					}
+				}
+
+				if(bestIndex == LocalPheromoneList.size()) break;
+
+				sharedIndices.push_back(bestIndex);
+
+				if(other.IsBadPheromoneLocation(LocalPheromoneList[bestIndex].GetLocation())) {
+					continue;
+				}
+
+				bool receiverAlreadyHasIt =
+					other.HasPheromone(LocalPheromoneList[bestIndex]);
+
+				if(receiverAlreadyHasIt) {
+					duplicateCount++;
+				}
+				else if(other.LocalPheromoneList.size() < MAX_LOCAL_PHEROMONES) {
+					other.LocalPheromoneList.push_back(LocalPheromoneList[bestIndex]);
+					sharedCount++;
+					DebugSharedPheromones++;
+
+					// std::cout << "[SHARE SUCCESS] "
+					// 		<< GetId()
+					// 		<< " shared pheromone with "
+					// 		<< other.GetId()
+					// 		<< " | distance=" << distance
+					// 		<< " | sender_count=" << LocalPheromoneList.size()
+					// 		<< " | receiver_count=" << other.LocalPheromoneList.size()
+					// 		<< std::endl;
+
+					// m_pcLEDs->SetAllColors(CColor::RED);
+					// other.m_pcLEDs->SetAllColors(CColor::GREEN);
 				}
 			}
 		}
 	}
+	// if(SimulationTick() % 1000 == 0 && 
+	// 	(sharedCount > 0 || duplicateCount > 0 || inactiveCount > 0)) {
+
+	// 	std::cout << "[SHARE SUMMARY] "
+	// 			  << GetId()
+	// 			  << " shared=" << sharedCount
+	// 			  << " duplicates=" << duplicateCount
+	// 			  << " inactive=" << inactiveCount
+	// 			  << " local_count=" << LocalPheromoneList.size()
+	// 			  << std::endl;
+	// 		}
 }
 
 /*****
@@ -806,6 +1039,16 @@ void CPFA_controller::SetLocalResourceDensity() {
 	//log_output_stream << "SiteFidelityPosition: " << SiteFidelityPosition << endl;
 	//log_output_stream.close();
 
+	/*
+	std::cout << "[DENSITY] "
+          << GetId()
+          << " found food | ResourceDensity="
+          << ResourceDensity
+          << " | position="
+          << GetPosition()
+          << std::endl;
+	*/
+
 	CreateLocalPheromone();
 }
 
@@ -855,38 +1098,67 @@ void CPFA_controller::SetFidelityList() {
  * return TRUE:  pheromone was successfully targeted
  *        FALSE: pheromones don't exist or are all inactive
  *****/
- bool CPFA_controller::SetTargetPheromone() {
-	argos::Real maxStrength = 0.0;
-	argos::Real randomWeight = 0.0;
-	bool isPheromoneSet = false;
+bool CPFA_controller::SetTargetPheromone() {
+    argos::Real totalScore = 0.0;
+    argos::Real randomScore = 0.0;
+    bool isPheromoneSet = false;
 
-	if(LocalPheromoneList.size() == 0) return false;
+    argos::Real followRoll =
+        RNG->Uniform(argos::CRange<argos::Real>(0.0, 1.0));
 
-	for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
-		if(LocalPheromoneList[i].IsActive()) {
-			maxStrength += LocalPheromoneList[i].GetWeight();
-		}
-	}
+    if(followRoll > PHEROMONE_FOLLOW_PROBABILITY) {
+        return false;
+    }
 
-	if(maxStrength <= 0.0) return false;
+    if(LocalPheromoneList.size() == 0) return false;
 
-	randomWeight = RNG->Uniform(argos::CRange<argos::Real>(0.0, maxStrength));
+    for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
+        if(!LocalPheromoneList[i].IsActive()) continue;
 
-	for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
-		if(!LocalPheromoneList[i].IsActive()) continue;
+        if(LocalPheromoneList[i].GetResourceDensity() < MIN_PHEROMONE_DENSITY) {
+            continue;
+        }
 
-		if(randomWeight < LocalPheromoneList[i].GetWeight()) {
+		argos::Real score = GetPheromoneScore(LocalPheromoneList[i]);
+
+		totalScore += score;
+    }
+
+    if(totalScore <= 0.0) return false;
+
+    randomScore = RNG->Uniform(argos::CRange<argos::Real>(0.0, totalScore));
+
+    for(size_t i = 0; i < LocalPheromoneList.size(); i++) {
+        if(!LocalPheromoneList[i].IsActive()) continue;
+
+        if(LocalPheromoneList[i].GetResourceDensity() < MIN_PHEROMONE_DENSITY) {
+            continue;
+        }
+
+		argos::Real score = GetPheromoneScore(LocalPheromoneList[i]);
+
+		if(randomScore < score) {
 			SetIsHeadingToNest(false);
-			SetTarget(LocalPheromoneList[i].GetLocation());
+
+			CurrentPheromoneTarget = LocalPheromoneList[i].GetLocation();
+			SetTarget(CurrentPheromoneTarget);
 			TrailToFollow = LocalPheromoneList[i].GetTrail();
+
+			isUsingPheromone = true;
+			isUsingSiteFidelity = false;
+			reachedPheromoneTarget = false;
+
+			DebugSelectedPheromones++;
+			DebugPheromoneSearchSelections++;
+
 			isPheromoneSet = true;
 			break;
 		}
 
-		randomWeight -= LocalPheromoneList[i].GetWeight();
-	}
+        randomScore -= score;
+    }
 
-	return isPheromoneSet;
+    return isPheromoneSet;
 }
 
 /*****

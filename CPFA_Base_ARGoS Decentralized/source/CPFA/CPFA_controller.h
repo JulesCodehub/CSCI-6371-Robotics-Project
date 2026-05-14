@@ -54,6 +54,7 @@ class CPFA_controller : public BaseController {
 
 		/* decentralized pheromone memory */
 		std::vector<Pheromone> LocalPheromoneList;
+		std::vector<argos::CVector2> BadPheromoneLocations;
 
 		/* robot position variables */
 		argos::CVector2 SiteFidelityPosition;
@@ -103,7 +104,11 @@ class CPFA_controller : public BaseController {
 		void UpdateLocalPheromoneList();
 		void SharePheromonesLocally();
 		bool HasPheromone(Pheromone& pheromone); 
+		void RemoveLocalPheromoneNear(argos::CVector2 location);
+		bool IsBadPheromoneLocation(argos::CVector2 location);
+		void AddBadPheromoneLocation(argos::CVector2 location); 
 
+		argos::Real GetPheromoneScore(Pheromone& pheromone);
 		argos::Real GetExponentialDecay(argos::Real value, argos::Real time, argos::Real lambda);
 		argos::Real GetBound(argos::Real value, argos::Real min, argos::Real max);
 		argos::Real GetPoissonCDF(argos::Real k, argos::Real lambda);
@@ -115,6 +120,8 @@ class CPFA_controller : public BaseController {
 		string results_path;
 		string results_full_path;
 		bool isUsingPheromone;
+		bool reachedPheromoneTarget;
+		argos::CVector2 CurrentPheromoneTarget;
 
 		unsigned int survey_count;
 		/* Pointer to the LEDs actuator */

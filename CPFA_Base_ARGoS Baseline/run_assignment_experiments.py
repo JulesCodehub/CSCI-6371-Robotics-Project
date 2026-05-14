@@ -68,7 +68,7 @@ def parse_score(output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", required=True, choices=["baseline", "decentralized"])
+    parser.add_argument("--version", required=True) 
     parser.add_argument("--runs", type=int, default=50)
     parser.add_argument("--out", default="results/assignment_scores.csv")
     parser.add_argument("--keep-temp-xml", action="store_true")

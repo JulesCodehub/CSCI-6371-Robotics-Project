@@ -5,7 +5,7 @@
   <!-- ************************* -->
   <framework>
     <system threads="0"/>
-    <experiment length="23040" random_seed="0" ticks_per_second="32"/>
+    <experiment length="720" random_seed="0" ticks_per_second="32"/>
   </framework>
 
   <!-- *************** -->
@@ -145,6 +145,6 @@
       <user_functions label="CPFA_qt_user_functions"/>
     </qt-opengl>
 
-  </visualization> -->
+  </visualization> --> 
 
 </argos-configuration>
