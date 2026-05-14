@@ -1,0 +1,7 @@
+distribution,version,count,mean,median,std,min,max
+clustered,Baseline CPFA,50,67.96,70.5,16.380625688879643,39.0,95.0
+clustered,Decentralized CPFA,50,86.4,86.0,9.499731467740743,69.0,109.0
+powerlaw,Baseline CPFA,50,135.08,142.5,27.36886358396255,54.0,156.0
+powerlaw,Decentralized CPFA,50,139.44,138.0,8.593210419053085,122.0,161.0
+random,Baseline CPFA,50,181.3,181.5,5.395576419434642,170.0,191.0
+random,Decentralized CPFA,50,145.36,145.5,12.28033104652497,120.0,167.0
